@@ -9,7 +9,7 @@
 </head>
 <body>
 <button id="playButton" style="font-size: 2em">Play Music</button>
-<audio id="myAudio" src="./M.mp3"></audio>
+<audio id="myAudio" src="/M.mp3"></audio>
 <canvas id="cvs"
         style="width: 100%;height: 100%;position: fixed;top: 0;left: 0;z-index: -1000;pointer-events: none"></canvas>
 <!--<script src="https://webgl2fundamentals.org/webgl/resources/m4.js"></script>-->
@@ -278,7 +278,7 @@
             n: 8,
             // 阿基米德螺旋线参数
             a: 0,
-            b: .75/*螺旋圆半径*/ / (2 * Math.PI * 8) // 控制螺旋线的间距
+            b: .5/*螺旋圆半径*/ / (2 * Math.PI * 8) // 控制螺旋线的间距
         }
 
         circlePassCtx = {
@@ -450,7 +450,7 @@
             let maxHzBinIdx = Math.floor((globalAudioCtx.curSampleRate * 0.5 * globalAudioCtx.fftSize) / globalAudioCtx.curSampleRate)
             for (let i = 0; i < globalCtx.circleInstanceCnt; i++) {
                 let instT = i / globalCtx.circleInstanceCnt
-                let linearBinIdx = Math.floor(instT * globalCtx.fftDataArr.length)
+                let linearBinIdx = Math.floor(instT * (maxHzBinIdx - minHzBinIdx)) + minHzBinIdx
                 let scaledBinIdx = toLogScale(minHzBinIdx, maxHzBinIdx, instT)
                 let v = Math.max(globalCtx.fftDataArr[scaledBinIdx], globalCtx.fftDataArr[linearBinIdx]) / 255
                 if (!v) {
@@ -459,7 +459,7 @@
                 let x = circlePassCtx.transformArr[i * 4]
                 let y = circlePassCtx.transformArr[i * 4 + 1]
                 let deg = circlePassCtx.transformArr[i * 4 + 2] = (circlePassCtx.transformArr[i * 4 + 2] + v / 256 + .005) % 100000
-                let radius = circlePassCtx.transformArr[i * 4 + 3] = v/*-Math.pow(4, -v) + 1*/ // make sure it never exceed above 1
+                let radius = circlePassCtx.transformArr[i * 4 + 3] = Math.pow(v, 2)/*-Math.pow(4, -v) + 1*/ // make sure it never exceed above 1
                 let mult = 1
                 if (i % 2 === 1) {
                     mult = -1; // 奇数点改变旋转方向
@@ -467,12 +467,12 @@
                 // * TRANSFORM
                 circlePassCtx.transformData[i * 4] = x + Math.cos(mult * deg + i) * radius
                 circlePassCtx.transformData[i * 4 + 1] = y + Math.sin(mult * deg + i) * radius
-                circlePassCtx.transformData[i * 4 + 2] = (-Math.pow(8, -v) + 1) * .1 // make sure it never exceed above
+                circlePassCtx.transformData[i * 4 + 2] = (-Math.pow(v - 1, 2) + 1) * .05/*(-Math.pow(8, -v) + 1) * .1*/ // make sure it never exceed above
                 // * COLOR
                 circlePassCtx.colorData[i * 4] = 1 - v
                 circlePassCtx.colorData[i * 4 + 1] = v
                 circlePassCtx.colorData[i * 4 + 2] = 1 - i / globalCtx.circleInstanceCnt
-                circlePassCtx.colorData[i * 4 + 3] = v + .5
+                circlePassCtx.colorData[i * 4 + 3] = (-Math.pow(v - 1, 2) + 1)/*v*/
             }
             // * UPLOAD TRANSFORM BUFFER
             globalCtx.gl.bindBuffer(globalCtx.gl.ARRAY_BUFFER, circlePassCtx.transformBuffer)
