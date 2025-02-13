@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="">
+<head>
+    <meta charset="UTF-8">
+    <!--  <link rel="icon" href="/favicon.ico">-->
+    <!--  <link rel="stylesheet" href="/src/assets/main.css">-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suancai</title>
+</head>
+<body>
+<button id="playButton" style="font-size: 2em">Play Music</button>
+<audio id="myAudio" src="/M.mp3"></audio>
+<canvas id="cvs"
+        style="width: 100%;height: 100%;position: fixed;top: 0;left: 0;z-index: -1000;pointer-events: none"></canvas>
+<!--<script src="https://webgl2fundamentals.org/webgl/resources/m4.js"></script>-->
+<script>
+    const circleVS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        in vec2 a_position;
+        in vec4 a_transform;
+        in vec4 a_color;
+
+        uniform vec2 u_resolution;
+
+        out vec4 v_color;
+
+        void main() {
+          vec2 position = a_position * (min(u_resolution.x, u_resolution.y) / u_resolution);
+          gl_Position = vec4(position * a_transform.z + a_transform.xy, 0, 1);
+          v_color = a_color;
+        }
+    `
+
+    const circleFS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        in vec4 v_color;
+        out vec4 fragColor;
+
+        void main() {
+          fragColor = v_color;
+        }
+    `
+
+    const transformVS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        in vec2 a_position;
+
+        void main() {
+          gl_Position = vec4(a_position, 0, 1);
+        }
+    `
+
+    const transformFS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D u_texture;
+        uniform vec2 u_resolution;
+        uniform vec4 u_transform;
+
+        out vec4 fragColor;
+
+        void main() {
+          vec2 uv = gl_FragCoord.xy / u_resolution;
+          uv = (uv - vec2(.5, .5)) * u_transform.z + vec2(.5, .5);
+          vec4 col = texture(u_texture, uv);
+          col *= .9;
+          // col *= col.a;
+          fragColor = col;
+        }
+    `
+
+    const kawaseBlurVS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        in vec2 a_position;
+
+        void main() {
+          gl_Position = vec4(a_position, 0, 1);
+        }
+    `
+
+    const kawaseBlurFS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D u_texture;
+        uniform vec2 u_resolution;
+        uniform vec4 u_transform;
+
+        out vec4 fragColor;
+
+        void main() {
+          vec2 uv = gl_FragCoord.xy / u_resolution;
+          vec4 col = vec4(0);
+          vec2 blurRadius = u_transform.xy;
+          vec2 texelSize = u_transform.zw;
+          col += texture(u_texture, uv + (blurRadius * vec2(1, 1) + vec2(0.5, 0.5)) * texelSize);
+          col += texture(u_texture, uv + (blurRadius * vec2(1, -1) + vec2(0.5, -0.5)) * texelSize);
+          col += texture(u_texture, uv + (blurRadius * vec2(-1, 1) + vec2(-0.5, 0.5)) * texelSize);
+          col += texture(u_texture, uv + (blurRadius * vec2(-1, -1) + vec2(-0.5, -0.5)) * texelSize);
+          // col += texture(u_texture, uv);
+          fragColor = col * .25;
+        }
+    `
+    const displaceVS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        in vec2 a_position;
+
+        void main() {
+          gl_Position = vec4(a_position, 0, 1);
+        }
+    `
+
+    const displaceFS = `#version 300 es
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D u_texture;
+        uniform vec2 u_resolution;
+        uniform vec4 u_transform;
+
+        out vec4 fragColor;
+
+        void main() {
+          vec2 uv = gl_FragCoord.xy / u_resolution;
+          vec4 newUV = texture(u_texture, uv);
+          float scaleX = .2;
+          float scaleY = .2;
+          vec4 displacedCol = texture(u_texture, uv + vec2(
+            (pow(newUV.r + newUV.g, 1.) / 1. + 0.) * scaleX,
+            (pow(newUV.b + newUV.g, 1.) / 1. + 0.) * scaleY
+          ));
+          fragColor = displacedCol;
+        }
+    `
+
+    // * Global Data
+    let globalCtx = {
+        fftDataArr: new Uint8Array(0)
+    }
+    let circlePassCtx = {}
+    let transformPassCtx = {}
+    let kawaseBlurPassCtx = {}
+    let displacePassCtx = {}
+
+    let globalAudioCtx = {
+        /**
+         * This AudioContext sample rate remains same for the whole lifetime after creation
+         */
+        fftSize: 8192,
+        curSampleRate: 8192, // * !!! MUST HAVE A INITIAL VALUE
+        audioSource: null,
+        audioAnalyser: null
+    }
+
+    function createShader(gl, source, type) {
+        let shader = gl.createShader(type)
+        gl.shaderSource(shader, source)
+        gl.compileShader(shader)
+        return shader
+    }
+
+    function createProgram(gl, vertexShaderSource, fragmentShaderSource) {
+        let program = gl.createProgram()
+        let vShader = createShader(gl, vertexShaderSource, gl.VERTEX_SHADER)
+        let fShader = createShader(gl, fragmentShaderSource, gl.FRAGMENT_SHADER)
+        gl.attachShader(program, vShader)
+        gl.attachShader(program, fShader)
+        gl.linkProgram(program)
+        gl.deleteShader(vShader)
+        gl.deleteShader(fShader)
+        let log = gl.getProgramInfoLog(program)
+        if (log) {
+            console.log(log)
+        }
+        log = gl.getShaderInfoLog(vShader)
+        if (log) {
+            console.log(log)
+        }
+        log = gl.getShaderInfoLog(fShader)
+        if (log) {
+            console.log(log)
+        }
+        return program
+    }
+
+    // 生成圆的顶点数据
+    function createCircleVertices(radius, segments) {
+        const vertices = []
+        const angleIncrement = (2 * Math.PI) / segments
+
+        // 圆心
+        vertices.push(0, 0)
+
+        // 圆周上的点
+        for (let i = 0; i <= segments; i++) {
+            const angle = i * angleIncrement
+            const x = radius * Math.cos(angle)
+            const y = radius * Math.sin(angle)
+            vertices.push(x, y)
+        }
+
+        return new Float32Array(vertices)
+    }
+
+    function toLogScale(min, max, t) {
+        // return Math.floor((1 - t) * min + t * max)
+        return Math.floor(min * Math.pow(max / min, t))
+    }
+
+    function Begin() {
+        let canvas = document.querySelector('#cvs')
+        canvas.width = window.innerWidth
+        canvas.height = window.innerHeight
+
+        let gl = canvas.getContext('webgl2', {antialias: true, alpha: false})
+        let isWebGL2 = !!gl
+        if (!isWebGL2) {
+            alert('浏览器不支持WebGL2')
+            console.warn('浏览器不支持WebGL2')
+            return
+        }
+
+        const width = canvas.width
+        const height = canvas.height
+
+        // * create render target texture
+        let rtTexRead = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, rtTexRead)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+
+        let rtTexWrite = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, rtTexWrite)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+
+        let rtTexDisplacedRead = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, rtTexDisplacedRead)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+
+        let rtTexDisplacedWrite = gl.createTexture()
+        gl.bindTexture(gl.TEXTURE_2D, rtTexDisplacedWrite)
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+
+        // * DON'T FORGET TO SET SAMPLE PROPS OF THE TEXTURES ABOVE
+        let rtArr = [rtTexRead, rtTexWrite, rtTexRead, rtTexWrite]
+        rtArr.forEach(rt => {
+            gl.bindTexture(gl.TEXTURE_2D, rt)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+            gl.bindTexture(gl.TEXTURE_2D, null)
+        })
+
+        globalCtx = {
+            gl: gl,
+            circleInstanceCnt: 128,
+            circleProg: createProgram(gl, circleVS, circleFS),
+            transformProg: createProgram(gl, transformVS, transformFS),
+            kawaseProg: createProgram(gl, kawaseBlurVS, kawaseBlurFS),
+            displaceProg: createProgram(gl, displaceVS, displaceFS),
+            fftDataArr: new Uint8Array(0),
+            // 螺旋线旋转的圈数
+            n: 8,
+            // 阿基米德螺旋线参数
+            a: 0,
+            b: .75/*螺旋圆半径*/ / (2 * Math.PI * 8) // 控制螺旋线的间距
+        }
+
+        circlePassCtx = {
+            positionLoc: gl.getAttribLocation(globalCtx.circleProg, 'a_position'),
+            transformLoc: gl.getAttribLocation(globalCtx.circleProg, 'a_transform'),
+            colorLoc: gl.getAttribLocation(globalCtx.circleProg, 'a_color'),
+            resolutionLoc: gl.getUniformLocation(globalCtx.circleProg, 'u_resolution'),
+            positionData: createCircleVertices(1, 32),
+            transformArr: new Float32Array(globalCtx.circleInstanceCnt * 4),
+            transformData: new Float32Array(globalCtx.circleInstanceCnt * 4),
+            colorData: new Float32Array(globalCtx.circleInstanceCnt * 4),
+            positionBuffer: null,
+            transformBuffer: null,
+            colorBuffer: null,
+            recordedVAO: undefined
+        }
+
+        transformPassCtx = {
+            positionLoc: gl.getAttribLocation(globalCtx.transformProg, 'a_position'),
+            transformLoc: gl.getUniformLocation(globalCtx.transformProg, 'u_transform'),
+            textureLoc: gl.getUniformLocation(globalCtx.transformProg, 'u_texture'),
+            resolutionLoc: gl.getUniformLocation(globalCtx.transformProg, 'u_resolution'),
+            positionData: new Float32Array([3, 1, -1, 1, -1, -3]),
+            transformData: new Float32Array([0, 0, 0, 0]),
+            positionBuffer: null,
+            transformBuffer: null,
+            recordedVAO: undefined
+        }
+
+        kawaseBlurPassCtx = {
+            positionLoc: gl.getAttribLocation(globalCtx.kawaseProg, 'a_position'),
+            transformLoc: gl.getUniformLocation(globalCtx.kawaseProg, 'u_transform'),
+            textureLoc: gl.getUniformLocation(globalCtx.kawaseProg, 'u_texture'),
+            resolutionLoc: gl.getUniformLocation(globalCtx.kawaseProg, 'u_resolution'),
+            positionData: new Float32Array([3, 1, -1, 1, -1, -3]),
+            transformData: new Float32Array([0, 0, 0, 0]),
+            positionBuffer: null,
+            transformBuffer: null,
+            recordedVAO: undefined
+        }
+
+        displacePassCtx = {
+            positionLoc: gl.getAttribLocation(globalCtx.displaceProg, 'a_position'),
+            transformLoc: gl.getUniformLocation(globalCtx.displaceProg, 'u_transform'),
+            textureLoc: gl.getUniformLocation(globalCtx.displaceProg, 'u_texture'),
+            resolutionLoc: gl.getUniformLocation(globalCtx.displaceProg, 'u_resolution'),
+            positionData: new Float32Array([3, 1, -1, 1, -1, -3]),
+            transformData: new Float32Array([0, 0, 0, 0]),
+            positionBuffer: null,
+            transformBuffer: null,
+            recordedVAO: undefined
+        }
+
+        // * 录制指令Circle
+        {
+            circlePassCtx.recordedVAO = gl.createVertexArray()
+            gl.bindVertexArray(circlePassCtx.recordedVAO)
+
+            circlePassCtx.positionBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, circlePassCtx.positionBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, circlePassCtx.positionData, gl.STATIC_DRAW)
+            gl.enableVertexAttribArray(circlePassCtx.positionLoc)
+            gl.vertexAttribPointer(circlePassCtx.positionLoc, 2, gl.FLOAT, false, 0, 0)
+
+            circlePassCtx.transformBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, circlePassCtx.transformBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, circlePassCtx.transformData, gl.DYNAMIC_DRAW)
+            gl.enableVertexAttribArray(circlePassCtx.transformLoc)
+            gl.vertexAttribPointer(circlePassCtx.transformLoc, 4, gl.FLOAT, false, 0, 0)
+            gl.vertexAttribDivisor(circlePassCtx.transformLoc, 1)
+
+            circlePassCtx.colorBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, circlePassCtx.colorBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, circlePassCtx.colorData, gl.DYNAMIC_DRAW)
+            gl.enableVertexAttribArray(circlePassCtx.colorLoc)
+            gl.vertexAttribPointer(circlePassCtx.colorLoc, 4, gl.FLOAT, false, 0, 0)
+            gl.vertexAttribDivisor(circlePassCtx.colorLoc, 1)
+
+            gl.bindVertexArray(null)
+        }
+
+        // * 录制指令Transform
+        {
+            transformPassCtx.recordedVAO = gl.createVertexArray()
+            gl.bindVertexArray(transformPassCtx.recordedVAO)
+
+            transformPassCtx.positionBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, transformPassCtx.positionBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, transformPassCtx.positionData, gl.STATIC_DRAW)
+            gl.enableVertexAttribArray(transformPassCtx.positionLoc)
+            gl.vertexAttribPointer(transformPassCtx.positionLoc, 2, gl.FLOAT, false, 0, 0)
+
+            gl.bindVertexArray(null)
+        }
+
+        // * 录制指令KawaseBlur
+        {
+            kawaseBlurPassCtx.recordedVAO = gl.createVertexArray()
+            gl.bindVertexArray(kawaseBlurPassCtx.recordedVAO)
+
+            kawaseBlurPassCtx.positionBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, kawaseBlurPassCtx.positionBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, kawaseBlurPassCtx.positionData, gl.STATIC_DRAW)
+            gl.enableVertexAttribArray(kawaseBlurPassCtx.positionLoc)
+            gl.vertexAttribPointer(kawaseBlurPassCtx.positionLoc, 2, gl.FLOAT, false, 0, 0)
+
+            gl.bindVertexArray(null)
+        }
+
+        // * 录制指令Displace
+        {
+            displacePassCtx.recordedVAO = gl.createVertexArray()
+            gl.bindVertexArray(displacePassCtx.recordedVAO)
+
+            displacePassCtx.positionBuffer = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, displacePassCtx.positionBuffer)
+            gl.bufferData(gl.ARRAY_BUFFER, displacePassCtx.positionData, gl.STATIC_DRAW)
+            gl.enableVertexAttribArray(displacePassCtx.positionLoc)
+            gl.vertexAttribPointer(displacePassCtx.positionLoc, 2, gl.FLOAT, false, 0, 0)
+
+            gl.bindVertexArray(null)
+        }
+
+        gl.clearColor(0.0, 0.0, 0.0, 0.0)
+
+        for (let i = 0; i < globalCtx.circleInstanceCnt; i++) {
+            const t = (i / globalCtx.circleInstanceCnt) * (2 * Math.PI * globalCtx.n);
+            const r = globalCtx.a + globalCtx.b * t;
+            const x = r * Math.cos(t);
+            const y = r * Math.sin(t);
+            circlePassCtx.transformArr[i * 4] = x
+            circlePassCtx.transformArr[i * 4 + 1] = y
+            circlePassCtx.transformArr[i * 4 + 2] = 0 //旋转度数
+            circlePassCtx.transformArr[i * 4 + 3] = 0 //半径长度
+        }
+
+        gl.clear(gl.COLOR_BUFFER_BIT)
+
+        function switchRT() {
+            let temp = rtTexRead
+            rtTexRead = rtTexWrite
+            rtTexWrite = temp
+        }
+
+        function switchDisplaceRT() {
+            let temp = rtTexDisplacedRead
+            rtTexDisplacedRead = rtTexDisplacedWrite
+            rtTexDisplacedWrite = temp
+        }
+
+        const framebuffer = gl.createFramebuffer();
+
+        // -- Render
+        function render() {
+
+            // * Render Circle
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTexWrite, 0);
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                console.error('Framebuffer is not complete');
+            }
+
+            // gl.clear(gl.COLOR_BUFFER_BIT)
+
+            gl.bindVertexArray(circlePassCtx.recordedVAO)
+            gl.useProgram(globalCtx.circleProg)
+
+            let minHzBinIdx = Math.floor((20 * globalAudioCtx.fftSize) / globalAudioCtx.curSampleRate)
+            let maxHzBinIdx = Math.floor((globalAudioCtx.curSampleRate * 0.5 * globalAudioCtx.fftSize) / globalAudioCtx.curSampleRate)
+            for (let i = 0; i < globalCtx.circleInstanceCnt; i++) {
+                let instT = i / globalCtx.circleInstanceCnt
+                let linearBinIdx = Math.floor(instT * globalCtx.fftDataArr.length)
+                let scaledBinIdx = toLogScale(minHzBinIdx, maxHzBinIdx, instT)
+                let v = Math.max(globalCtx.fftDataArr[scaledBinIdx], globalCtx.fftDataArr[linearBinIdx]) / 255
+                if (!v) {
+                    v = 0
+                }
+                let x = circlePassCtx.transformArr[i * 4]
+                let y = circlePassCtx.transformArr[i * 4 + 1]
+                let deg = circlePassCtx.transformArr[i * 4 + 2] = (circlePassCtx.transformArr[i * 4 + 2] + v / 256 + .005) % 100000
+                let radius = circlePassCtx.transformArr[i * 4 + 3] = v/*-Math.pow(4, -v) + 1*/ // make sure it never exceed above 1
+                let mult = 1
+                if (i % 2 === 1) {
+                    mult = -1; // 奇数点改变旋转方向
+                }
+                // * TRANSFORM
+                circlePassCtx.transformData[i * 4] = x + Math.cos(mult * deg + i) * radius
+                circlePassCtx.transformData[i * 4 + 1] = y + Math.sin(mult * deg + i) * radius
+                circlePassCtx.transformData[i * 4 + 2] = (-Math.pow(8, -v) + 1) * .1 // make sure it never exceed above
+                // * COLOR
+                circlePassCtx.colorData[i * 4] = 1 - v
+                circlePassCtx.colorData[i * 4 + 1] = v
+                circlePassCtx.colorData[i * 4 + 2] = 1 - i / globalCtx.circleInstanceCnt
+                circlePassCtx.colorData[i * 4 + 3] = v + .5
+            }
+            // * UPLOAD TRANSFORM BUFFER
+            globalCtx.gl.bindBuffer(globalCtx.gl.ARRAY_BUFFER, circlePassCtx.transformBuffer)
+            globalCtx.gl.bufferSubData(globalCtx.gl.ARRAY_BUFFER, 0, circlePassCtx.transformData)
+            globalCtx.gl.bindBuffer(globalCtx.gl.ARRAY_BUFFER, null)
+            // * UPLOAD COLOR BUFFER
+            globalCtx.gl.bindBuffer(globalCtx.gl.ARRAY_BUFFER, circlePassCtx.colorBuffer)
+            globalCtx.gl.bufferSubData(globalCtx.gl.ARRAY_BUFFER, 0, circlePassCtx.colorData)
+            globalCtx.gl.bindBuffer(globalCtx.gl.ARRAY_BUFFER, null)
+
+            gl.uniform2f(circlePassCtx.resolutionLoc, canvas.width, canvas.height)
+
+            // 启用混合功能
+            gl.enable(gl.BLEND);
+            gl.blendEquation(gl.FUNC_ADD)
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+            // gl.blendFunc(gl.ONE_MINUS_DST_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+
+            gl.drawArraysInstanced(
+                gl.TRIANGLE_FAN,
+                0,             // offset
+                circlePassCtx.positionData.length,   // num vertices per instance
+                globalCtx.circleInstanceCnt  // num instances
+            )
+
+            // * Render Transform
+            switchRT()
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTexWrite, 0);
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                console.error('Framebuffer is not complete');
+            }
+
+            gl.bindVertexArray(transformPassCtx.recordedVAO)
+            gl.useProgram(globalCtx.transformProg)
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, rtTexRead);
+            gl.uniform1i(transformPassCtx.textureLoc, 0);
+
+            gl.uniform4f(transformPassCtx.transformLoc, 0, 0, .99, 0)
+            gl.uniform2f(transformPassCtx.resolutionLoc, canvas.width, canvas.height)
+
+            gl.disable(gl.BLEND);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6)
+
+            // * KawaseBlur
+            gl.bindVertexArray(kawaseBlurPassCtx.recordedVAO)
+            gl.useProgram(globalCtx.kawaseProg)
+
+            gl.disable(gl.BLEND);
+
+            let texelSize = {
+                x: 1 / canvas.width,
+                y: 1 / canvas.height
+            }
+            let itCnt = 4;
+            for (let i = 0; i < itCnt; i++) {
+                switchRT()
+                gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTexWrite, 0);
+                if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                    console.error('Framebuffer is not complete');
+                }
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, rtTexRead);
+                gl.uniform1i(kawaseBlurPassCtx.textureLoc, 0);
+                // * first two is blur radius, last two is texel size
+                gl.uniform4f(kawaseBlurPassCtx.transformLoc, i, i, texelSize.x, texelSize.y)
+                gl.uniform2f(kawaseBlurPassCtx.resolutionLoc, canvas.width, canvas.height)
+
+                gl.drawArrays(gl.TRIANGLES, 0, 6)
+            }
+
+            // * Displace
+            switchRT()
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTexDisplacedWrite, 0);
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                console.error('Framebuffer is not complete');
+            }
+
+            gl.bindVertexArray(displacePassCtx.recordedVAO)
+            gl.useProgram(globalCtx.displaceProg)
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, rtTexRead);
+            gl.uniform1i(displacePassCtx.textureLoc, 0);
+
+            // gl.uniform4f(displacePassCtx.transformLoc, 0, 0, 0, 0)
+            gl.uniform2f(displacePassCtx.resolutionLoc, canvas.width, canvas.height)
+
+            gl.disable(gl.BLEND);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6)
+
+            // * Blur Displace
+            gl.bindVertexArray(kawaseBlurPassCtx.recordedVAO)
+            gl.useProgram(globalCtx.kawaseProg)
+
+            gl.disable(gl.BLEND);
+
+            texelSize = {
+                x: 1 / canvas.width,
+                y: 1 / canvas.height
+            }
+            itCnt = 1;
+            for (let i = 0; i < itCnt; i++) {
+                switchDisplaceRT()
+                gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTexDisplacedWrite, 0);
+                if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+                    console.error('Framebuffer is not complete');
+                }
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, rtTexDisplacedRead);
+                gl.uniform1i(kawaseBlurPassCtx.textureLoc, 0);
+                // * first two is blur radius, last two is texel size
+                gl.uniform4f(kawaseBlurPassCtx.transformLoc, i, i, texelSize.x, texelSize.y)
+                gl.uniform2f(kawaseBlurPassCtx.resolutionLoc, canvas.width, canvas.height)
+
+                gl.drawArrays(gl.TRIANGLES, 0, 6)
+            }
+
+            // * Render to screen
+            gl.bindVertexArray(transformPassCtx.recordedVAO)
+            gl.useProgram(globalCtx.transformProg)
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, rtTexDisplacedWrite);
+            gl.uniform1i(transformPassCtx.textureLoc, 0);
+
+            gl.uniform4f(transformPassCtx.transformLoc, 0, 0, 1, 0)
+            gl.uniform2f(transformPassCtx.resolutionLoc, canvas.width, canvas.height)
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6)
+
+            requestAnimationFrame(render)
+        }
+
+        render()
+    }
+
+    Begin()
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    // 获取按钮元素
+    const playButton = document.getElementById('playButton');
+    const audioTag = document.getElementById('myAudio');
+    audioTag.addEventListener('canplay', () => {
+        // console.warn(globalAudioCtx.curSampleRate)
+    })
+    let capStarted = false
+
+    function startCaptureAudioFFTData() {
+        // 创建音频上下文
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let source = globalAudioCtx.audioSource = audioContext.createMediaElementSource(audioTag);
+        let analyser = globalAudioCtx.audioAnalyser = audioContext.createAnalyser();
+        globalAudioCtx.curSampleRate = audioContext.sampleRate
+        analyser.fftSize = globalAudioCtx.fftSize
+        analyser.maxDecibels = -20
+        analyser.minDecibels = -80
+        analyser.smoothingTimeConstant = .9
+        const bufferLength = analyser.frequencyBinCount;
+        globalCtx.fftDataArr = new Uint8Array(bufferLength);
+        // 连接音频节点
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        // 循环获取 FFT 数据
+        function updateAudioFFTData() {
+            analyser.getByteFrequencyData(globalCtx.fftDataArr);
+            requestAnimationFrame(updateAudioFFTData);
+        }
+
+        // 开始更新循环
+        updateAudioFFTData();
+    }
+
+    function playMusic(url) {
+        if (!capStarted) {
+            capStarted = true
+            startCaptureAudioFFTData()
+        }
+        audioTag.src = url
+        audioTag.load()
+        audioTag.play()
+        audioTag.currentTime = 0
+    }
+
+    playButton.addEventListener('click', () => {
+        playMusic('M.mp3')
+    });
+</script>
+</body>
+</html>
