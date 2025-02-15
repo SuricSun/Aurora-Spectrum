@@ -70,7 +70,11 @@
           vec2 uv = gl_FragCoord.xy / u_resolution;
           uv = (uv - vec2(.5, .5)) * u_transform.z + vec2(.5, .5);
           vec4 col = texture(u_texture, uv);
-          col *= .9;
+          // Fix color-banding issue, change this value would effect the fading speed of the color
+          // Could dynamically configure it based on the configured fading time ms and the rAF(requestAnimationFrame) call interval ms
+          // That is, I want it to fade to 0 in 1000ms, I could set it to minus by (1. / 1000), Just find a value that make it looks decent
+          col -= .025;
+          //col *= .9;
           // col *= col.a;
           fragColor = col;
         }
